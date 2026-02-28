@@ -23,24 +23,24 @@ Invoke Google Gemini CLI as a subprocess for tasks where its 1M token context wi
 ### Research / Analysis (read-only, no tool approval needed)
 
 ```bash
-gemini -m gemini-3.1-pro-preview -p "PROMPT" --output-format json 2>/dev/null
+gemini -m gemini-3-pro-preview -p "PROMPT" --output-format json 2>/dev/null
 ```
 
 ### Code Analysis with File References
 
 ```bash
-gemini -m gemini-3.1-pro-preview -p "PROMPT @./src/" --output-format json 2>/dev/null
+gemini -m gemini-3-pro-preview -p "PROMPT @./src/" --output-format json 2>/dev/null
 ```
 
 ### File-Editing Tasks (auto-approve tools)
 
 ```bash
-gemini -m gemini-3.1-pro-preview -y -p "PROMPT" --output-format json 2>/dev/null
+gemini -m gemini-3-pro-preview -y -p "PROMPT" --output-format json 2>/dev/null
 ```
 
 ## Invocation Rules
 
-1. ALWAYS use `-m gemini-3.1-pro-preview` — never rely on auto-routing
+1. ALWAYS use `-m gemini-3-pro-preview` — never rely on auto-routing
 2. Always use `--output-format json` for parseable output
 3. Always redirect stderr: `2>/dev/null`
 4. Parse the `response` field from JSON output
