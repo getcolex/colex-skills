@@ -23,57 +23,42 @@ Invoke Google Gemini CLI as a subprocess for tasks where its 1M token context wi
 ### Research / Analysis (read-only, no tool approval needed)
 
 ```bash
-gemini -m gemini-3-pro-preview -p "PROMPT" --output-format json 2>/dev/null
+gemini -m gemini-3-pro-preview -p "PROMPT" 2>&1 | tail -200
 ```
 
 ### Code Analysis with File References
 
 ```bash
-gemini -m gemini-3-pro-preview -p "PROMPT @./src/" --output-format json 2>/dev/null
+gemini -m gemini-3-pro-preview -p "PROMPT @./src/" 2>&1 | tail -200
 ```
 
 ### File-Editing Tasks (auto-approve tools)
 
 ```bash
-gemini -m gemini-3-pro-preview -y -p "PROMPT" --output-format json 2>/dev/null
+gemini -m gemini-3-pro-preview -y -p "PROMPT" 2>&1 | tail -200
 ```
 
 ## Invocation Rules
 
 1. ALWAYS use `-m gemini-3-pro-preview` — never rely on auto-routing
-2. Always use `--output-format json` for parseable output
-3. Always redirect stderr: `2>/dev/null`
-4. Parse the `response` field from JSON output
-4. Use `@./path/` references in prompts to include files/directories in context
-5. Use `-y` / `--yolo` ONLY when Gemini should edit files or run shell commands
-6. Default to read-only (no `-y`) unless the task explicitly requires writes
-7. Set working directory with `cd /path/to/project &&` before invocation
-8. For piped input: `cat file | gemini -p "instruction" --output-format json 2>/dev/null`
-9. For file references in prompts use `@` syntax: `gemini -p "Review @./src/index.ts"`
-
-## JSON Output Structure
-
-```json
-{
-  "response": "The model's text answer",
-  "stats": {
-    "models": { ... },
-    "tools": { "totalCalls": 0, "totalSuccess": 0, ... }
-  },
-  "error": null
-}
-```
-
-On failure, `response` is null and `error` contains `{ "type": "...", "message": "..." }`.
+2. Do NOT use `--output-format json` — plain text output is easier to read and debug
+3. Pipe through `tail -200` to capture the relevant output (adjust line count as needed)
+4. Redirect stderr to stdout with `2>&1` so errors are visible
+5. Use `@./path/` references in prompts to include files/directories in context
+6. Use `-y` / `--yolo` ONLY when Gemini should edit files or run shell commands
+7. Default to read-only (no `-y`) unless the task explicitly requires writes
+8. Set working directory with `cd /path/to/project &&` before invocation
+9. For piped input: `cat file | gemini -p "instruction" 2>&1 | tail -200`
+10. For file references in prompts use `@` syntax: `gemini -p "Review @./src/index.ts"`
 
 Exit codes: 0=success, 1=API error, 41=auth failure, 42=input error, 53=turn limit.
 
 ## Error Handling
 
-1. If exit code is non-zero, read the JSON `error` field
+1. If exit code is non-zero, check the output for error details
 2. If `gemini` command not found — inform user to install: `npm install -g @google/gemini-cli`
 3. If auth error (41) — inform user to run `gemini` interactively to re-authenticate
-4. If rate limited (response contains 429) — wait 60s and retry once, then report to user
+4. If rate limited (429) — wait 60s and retry once, then report to user
 5. Never retry more than once automatically
 
 ## Prompt Engineering for Gemini
