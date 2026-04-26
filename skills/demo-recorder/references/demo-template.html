@@ -1,0 +1,252 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>%%TITLE%%</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: #0a0a0a; color: #fff;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    height: 100vh; display: flex; flex-direction: column;
+    overflow: hidden;
+  }
+
+  /* Image viewer — fixed 1280x800 aspect ratio */
+  .viewer {
+    flex: 1; display: flex; align-items: center; justify-content: center;
+    position: relative; padding: 16px;
+  }
+  .frame-container {
+    position: relative; width: 1280px; height: 800px;
+    max-width: 100%; max-height: 100%;
+    border-radius: 12px; overflow: hidden;
+    box-shadow: 0 8px 60px rgba(0,0,0,0.6);
+    background: #111;
+  }
+  .frame-container img {
+    width: 100%; height: 100%; object-fit: contain;
+    display: block; image-rendering: -webkit-optimize-contrast;
+  }
+
+  /* Hotspot — bounding box highlight */
+  .hotspot {
+    position: absolute; border: 2px solid rgba(231, 76, 60, 0.8);
+    border-radius: 6px; cursor: pointer;
+    background: rgba(231, 76, 60, 0.08);
+    transition: background 0.2s, border-color 0.2s;
+    z-index: 10;
+  }
+  .hotspot:hover {
+    background: rgba(231, 76, 60, 0.15);
+    border-color: rgba(231, 76, 60, 1);
+  }
+
+  /* Pulsing dot inside hotspot */
+  .hotspot-dot {
+    position: absolute; top: 50%; left: 50%;
+    transform: translate(-50%, -50%);
+    width: 16px; height: 16px; border-radius: 50%;
+    background: #e74c3c;
+    animation: pulse 1.5s ease-in-out infinite;
+    pointer-events: none;
+  }
+  @keyframes pulse {
+    0%, 100% { transform: translate(-50%, -50%) scale(1); opacity: 1; }
+    50% { transform: translate(-50%, -50%) scale(1.8); opacity: 0.4; }
+  }
+
+  /* Tooltip */
+  .tooltip {
+    position: absolute; z-index: 20;
+    background: #1a1a1a; color: #fff; border: 1px solid #333;
+    padding: 10px 16px; border-radius: 8px;
+    font-size: 14px; line-height: 1.4;
+    max-width: 300px; pointer-events: none;
+    box-shadow: 0 4px 20px rgba(0,0,0,0.4);
+    white-space: nowrap;
+  }
+  .tooltip .tip-step {
+    font-size: 11px; color: #e74c3c; font-weight: 700;
+    letter-spacing: 0.5px; margin-bottom: 2px;
+  }
+
+  /* Dim overlay — disabled, kept for future use */
+  .dim-overlay { display: none !important; }
+
+  /* Bottom bar */
+  .controls {
+    background: #111; border-top: 1px solid #222;
+    padding: 12px 24px; display: flex; align-items: center; gap: 16px;
+    flex-shrink: 0;
+  }
+  .progress { display: flex; gap: 6px; align-items: center; }
+  .dot {
+    width: 10px; height: 10px; border-radius: 50%;
+    background: #333; cursor: pointer; transition: all 0.2s;
+    border: 2px solid transparent;
+  }
+  .dot.active { background: #e74c3c; border-color: #e74c3c; }
+  .dot.done { background: #555; }
+  .dot:hover { background: #666; }
+  .caption-area { flex: 1; }
+  .caption-step {
+    background: #e74c3c; color: #fff; border-radius: 4px;
+    padding: 2px 8px; font-size: 11px; font-weight: 700;
+    letter-spacing: 0.5px; display: inline-block; margin-right: 10px;
+  }
+  .caption-text { font-size: 14px; color: #999; }
+  .counter { font-size: 12px; color: #555; }
+  .help { font-size: 11px; color: #444; }
+
+  /* No-hotspot frame — click anywhere overlay */
+  .click-anywhere {
+    position: absolute; inset: 0; z-index: 10;
+    cursor: pointer; border-radius: 12px;
+  }
+  .click-anywhere-hint {
+    position: absolute; bottom: 24px; left: 50%;
+    transform: translateX(-50%);
+    background: rgba(0,0,0,0.7); color: #888;
+    padding: 6px 16px; border-radius: 20px;
+    font-size: 12px; pointer-events: none;
+    z-index: 15;
+  }
+</style>
+</head>
+<body>
+
+<div class="viewer">
+  <div class="frame-container" id="container">
+    <img id="slide" alt="Demo frame" draggable="false">
+    <div class="dim-overlay" id="dim" style="display:none"></div>
+    <!-- Hotspot and tooltip injected dynamically -->
+  </div>
+</div>
+
+<div class="controls">
+  <div class="progress" id="dots"></div>
+  <div class="caption-area">
+    <span class="caption-step" id="badge"></span>
+    <span class="caption-text" id="caption"></span>
+  </div>
+  <span class="counter" id="counter"></span>
+  <span class="help">Click hotspot or press &rarr;</span>
+</div>
+
+<script>
+const frames = %%FRAMES_JSON%%;
+let current = 0;
+const container = document.getElementById('container');
+
+function render() {
+  const f = frames[current];
+  document.getElementById('slide').src = f.src;
+  document.getElementById('badge').textContent = 'Step ' + f.step;
+  document.getElementById('caption').textContent = f.caption;
+  document.getElementById('counter').textContent = (current + 1) + ' / ' + frames.length;
+
+  // Update dots
+  document.querySelectorAll('.dot').forEach((d, i) => {
+    d.className = 'dot' + (i === current ? ' active' : i < current ? ' done' : '');
+  });
+
+  // Clear old hotspot/tooltip/click-anywhere
+  container.querySelectorAll('.hotspot, .tooltip, .click-anywhere, .click-anywhere-hint').forEach(el => el.remove());
+  const dim = document.getElementById('dim');
+
+  // Get container actual render size for coordinate scaling
+  const rect = container.getBoundingClientRect();
+  const scaleX = rect.width / 1280;
+  const scaleY = rect.height / 800;
+
+  if (f.hotspot && current < frames.length - 1) {
+    dim.style.display = 'block';
+    const h = f.hotspot;
+
+    // Hotspot box
+    const box = document.createElement('div');
+    box.className = 'hotspot';
+    box.style.left = (h.x * scaleX) + 'px';
+    box.style.top = (h.y * scaleY) + 'px';
+    box.style.width = (h.width * scaleX) + 'px';
+    box.style.height = (h.height * scaleY) + 'px';
+    box.onclick = () => go(1);
+
+    const dot = document.createElement('div');
+    dot.className = 'hotspot-dot';
+    box.appendChild(dot);
+    container.appendChild(box);
+
+    // Tooltip — position below or above the hotspot
+    const tip = document.createElement('div');
+    tip.className = 'tooltip';
+    const tipStep = document.createElement('div');
+    tipStep.className = 'tip-step';
+    tipStep.textContent = 'STEP ' + f.step;
+    const tipText = document.createElement('div');
+    tipText.textContent = f.tooltip || f.caption;
+    tip.appendChild(tipStep);
+    tip.appendChild(tipText);
+
+    // Position tooltip below hotspot, or above if near bottom
+    const tipY = h.y + h.height + 12;
+    if (tipY > 700) {
+      tip.style.bottom = ((800 - h.y + 12) * scaleY) + 'px';
+    } else {
+      tip.style.top = (tipY * scaleY) + 'px';
+    }
+    // Center horizontally on hotspot
+    const tipX = h.x + h.width / 2;
+    if (tipX > 900) {
+      tip.style.right = ((1280 - h.x - h.width) * scaleX) + 'px';
+    } else {
+      tip.style.left = (h.x * scaleX) + 'px';
+    }
+    container.appendChild(tip);
+  } else {
+    dim.style.display = 'none';
+    // No hotspot — click anywhere to advance (or last frame)
+    if (current < frames.length - 1) {
+      const ca = document.createElement('div');
+      ca.className = 'click-anywhere';
+      ca.onclick = () => go(1);
+      container.appendChild(ca);
+      const hint = document.createElement('div');
+      hint.className = 'click-anywhere-hint';
+      hint.textContent = 'Click anywhere to continue';
+      container.appendChild(hint);
+    }
+  }
+}
+
+function go(delta) {
+  const next = current + delta;
+  if (next < 0 || next >= frames.length) return;
+  current = next;
+  render();
+}
+
+// Build dots
+const dotsEl = document.getElementById('dots');
+frames.forEach((_, i) => {
+  const d = document.createElement('div');
+  d.className = 'dot';
+  d.onclick = () => { current = i; render(); };
+  dotsEl.appendChild(d);
+});
+
+// Keyboard nav
+document.addEventListener('keydown', e => {
+  if (e.key === 'ArrowRight' || e.key === ' ') { e.preventDefault(); go(1); }
+  if (e.key === 'ArrowLeft') { e.preventDefault(); go(-1); }
+});
+
+// Handle window resize — re-render to rescale hotspots
+window.addEventListener('resize', () => render());
+
+render();
+</script>
+</body>
+</html>
