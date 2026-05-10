@@ -48,13 +48,18 @@ import { resolve, dirname, basename, join } from 'node:path';
 
 const args = process.argv.slice(2);
 if (args.length === 0) {
-  console.error('Usage: parse-bullets.mjs <path-to-divergences.md> [--worktree <path>]');
+  console.error('Usage: parse-bullets.mjs <path-to-divergences.md> [--worktree <path>] [--skip-pre-existing-fixed]');
   process.exit(2);
 }
 const docPath = resolve(args[0]);
 let worktreePath = null;
 const wIdx = args.indexOf('--worktree');
 if (wIdx !== -1 && args[wIdx + 1]) worktreePath = resolve(args[wIdx + 1]);
+// When set, [x] bullets without a <!-- dispatched: --> marker are treated as
+// legacy / pre-existing fixes and skipped (instead of redispatched). Use this
+// when adopting the skill on a doc that has approval state from earlier rounds
+// of work that pre-date the skill's commit-tracking convention.
+const skipPreExistingFixed = args.includes('--skip-pre-existing-fixed');
 
 if (!existsSync(docPath)) {
   console.error(`File not found: ${docPath}`);
@@ -288,6 +293,14 @@ for (const m of sec9.matchAll(BULLET_RE)) {
   // explicit "previous attempt was wrong, try again with this note" signal.
   if (state === 'approved' && dispatchedSha) {
     skipped.push({ id, reason: `already dispatched at ${dispatchedSha.slice(0, 7)} — awaiting designer verification` });
+    continue;
+  }
+
+  // Legacy bullets shipped before the skill existed are [x] but have no
+  // dispatched marker. With --skip-pre-existing-fixed they're treated as
+  // already done. Without the flag they would be redispatched on every run.
+  if (state === 'approved' && !dispatchedSha && skipPreExistingFixed) {
+    skipped.push({ id, reason: 'pre-existing fix (no dispatched marker, --skip-pre-existing-fixed set)' });
     continue;
   }
 

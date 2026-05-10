@@ -13,7 +13,7 @@
  *   node scripts/build-verify-dashboard.mjs
  *   node scripts/verify-server.mjs # then: open http://localhost:4567/
  */
-import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs';
+import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 
 const REPO = process.cwd();
@@ -22,8 +22,20 @@ const RESULTS = join(REPO, 'uimatch-results');
 const RESULTS_FIXED = join(REPO, 'uimatch-results-fixed');
 const PER_BULLET = join(RESULTS, 'per-bullet');
 const OUT = join(REPO, 'docs/verify.html');
-const FIGMA_FILE_KEY = 'Fsbd038PdcTTeUVRvhIhuG'; // Tiny Miracles file
+
+// Read FIGMA_FILE_KEY from .ui-check-config.json (preferred) or fall back to
+// the FIGMA_FILE_KEY env var. The previous hardcoded value is a last-resort
+// shim for projects that pre-date the config file.
+const CFG_PATH = join(REPO, '.ui-check-config.json');
+const CFG = existsSync(CFG_PATH)
+  ? (() => { try { return JSON.parse(readFileSync(CFG_PATH, 'utf8')); } catch { return {}; } })()
+  : {};
+const FIGMA_FILE_KEY =
+  CFG.figma_file_key ||
+  process.env.FIGMA_FILE_KEY ||
+  ''; // empty → Figma deep-links omitted (graceful degrade)
 const FIGMA_TOKEN = process.env.FIGMA_ACCESS_TOKEN;
+const LIVE_URL = CFG.live_url || 'http://localhost:3000';
 const HAS_FIXED = existsSync(RESULTS_FIXED);
 
 // Read the cached viewport for a Figma node (written by parse-bullets.mjs).
@@ -154,12 +166,66 @@ const FRAME_HINTS = [
 //   1. Cited Figma node maps to a known frame (NODE_TO_FRAME).
 //   2. Keyword match in body (FRAME_HINTS).
 //   3. null.
+// Optional ancestry map written by figma-context-export.mjs:
+//   { "<leaf-node-id>": { artboard_node_id, artboard_name, artboard_size } }
+// Lets pickFrame fall back to the enclosing Figma artboard when neither the
+// hand-curated NODE_TO_FRAME nor FRAME_HINTS produce a match. This is what
+// rescues §9F/§9G (modal) bullets whose cited nodes weren't in NODE_TO_FRAME.
+const LEAF_TO_ARTBOARD_PATH = join(REPO, 'uimatch-results/leaf-to-artboard.json');
+const LEAF_TO_ARTBOARD = existsSync(LEAF_TO_ARTBOARD_PATH)
+  ? (() => { try { return JSON.parse(readFileSync(LEAF_TO_ARTBOARD_PATH, 'utf8')); } catch { return {}; } })()
+  : {};
+
+// Match an artboard id (e.g. "233:5518") to a uimatch-results-fixed/<dir>
+// frame name. uimatch's suite items name frames like "frame-233-32" using a
+// 6-char prefix of the suite-item Figma node id; we walk the available
+// directories looking for any whose name endswith the artboard's normalized
+// id, so 233:5518 matches "037-frame-233-58" if the suite ran on a parent
+// node rooted at 233:5518's same family.
+// uimatch suite generators tend to truncate the Figma node id when naming
+// frame dirs (e.g. node 233:5518 → "frame-233-55", taking a 6-char prefix
+// of the safe form "233-5518"). We try the full id first (older suites) and
+// fall back to progressive prefixes.
+function artboardToFrameDir(artboardNodeId) {
+  if (!artboardNodeId) return null;
+  const safe = artboardNodeId.replace(':', '-');
+  const candidates = [];
+  // Full id, then 7, 6, 5 char prefixes of the safe id.
+  candidates.push(safe);
+  for (let n = 7; n >= 5; n--) {
+    if (safe.length > n) candidates.push(safe.slice(0, n));
+  }
+  for (const root of [RESULTS, RESULTS_FIXED]) {
+    if (!existsSync(root)) continue;
+    try {
+      const dirs = readdirSync(root).filter((d) => d.startsWith('0') && d.includes('frame-'));
+      for (const cand of candidates) {
+        const hit = dirs.find((d) => d.endsWith(cand) || d.endsWith(`-${cand}`));
+        if (hit) return hit;
+      }
+    } catch {
+      /* ignore */
+    }
+  }
+  return null;
+}
+
 function pickFrame(body, citedNodes = []) {
   for (const node of citedNodes) {
     if (NODE_TO_FRAME[node]) return NODE_TO_FRAME[node];
   }
   for (const { rx, frame } of FRAME_HINTS) {
     if (rx.test(body)) return frame;
+  }
+  // Last resort: walk Figma ancestry via leaf-to-artboard map written by
+  // figma-context-export.mjs. The dashboard then maps the artboard id to a
+  // uimatch-results frame directory, if any.
+  for (const node of citedNodes) {
+    const entry = LEAF_TO_ARTBOARD[node];
+    if (entry?.artboard_node_id) {
+      const frame = artboardToFrameDir(entry.artboard_node_id);
+      if (frame) return frame;
+    }
   }
   return null;
 }
@@ -358,11 +424,15 @@ function renderCard(bullet) {
   if (figmaNodeId) {
     planNodeFetch(figmaNodeId);
     const safeId = figmaNodeId.replace(/[:]/g, '-');
-    // Prefer the parent-frame export with the leaf bbox highlighted (gives
-    // the reviewer surrounding context). Fall back to the bare leaf export
-    // if context generation hasn't run yet.
+    // Prefer the per-bullet ZOOMED export (tight crop around the cited node
+    // with surrounding context padding). This gives reviewers a readable view
+    // of the divergence instead of the full artboard with a tiny red box.
+    // Fall back to the full annotated artboard, then the bare leaf export.
+    const zoomPath = join(REPO, 'uimatch-results', 'per-bullet-context', `${safeId}-zoom.png`);
     const contextPath = join(REPO, 'uimatch-results', 'per-bullet-context', `${safeId}.png`);
-    if (existsSync(contextPath)) {
+    if (existsSync(zoomPath)) {
+      perBulletFigma = `../uimatch-results/per-bullet-context/${safeId}-zoom.png`;
+    } else if (existsSync(contextPath)) {
       perBulletFigma = `../uimatch-results/per-bullet-context/${safeId}.png`;
     } else {
       perBulletFigma = `../uimatch-results/per-bullet/${safeId}.png`;
@@ -405,13 +475,22 @@ function renderCard(bullet) {
   // The Figma thumbnail links DIRECTLY to figma.com (open the node in
   // Figma) instead of opening the PNG, since that's what designers want.
   const figmaHref = figmaNodeId ? figmaUrlForNode(figmaNodeId) : null;
+  const fixedImg = fixedEvidence?.impl ?? null;
+  // The "Fixed" column label is taken from .ui-check-config.json's live_url
+  // so the dashboard reflects whichever port this worktree's dev server uses.
+  // Falls back to "Fixed" when no config is present.
+  const fixedLabel = LIVE_URL ? `Fixed (${LIVE_URL.replace(/^https?:\/\/[^/]*?(:\d+)?.*$/, '$1') || ''})`.replace('()', '') : 'Fixed';
   let thumbsHtml = '';
-  if (evidence || figmaImg) {
+  // Render thumbs whenever we have ANY image to show — Figma reference,
+  // current-side capture, or post-fix capture. Previously this was gated on
+  // `evidence || figmaImg`, which dropped fixed-side images for cards whose
+  // current-side uimatch run hadn't completed.
+  if (evidence || figmaImg || fixedImg) {
     if (kind === 'color') {
       thumbsHtml = `
         <div class="thumbs thumbs-2">
           ${thumb(figmaImg, 'Figma (node)', figmaHref)}
-          ${thumb(evidence?.impl, 'Live')}
+          ${thumb(fixedImg ?? evidence?.impl, fixedImg ? fixedLabel : 'Live')}
         </div>
       `;
     } else if (kind === 'text' && pair) {
@@ -419,17 +498,36 @@ function renderCard(bullet) {
     } else {
       // layout, OR text without an extractable pair.
       // Layout depends on whether we have a fixed-branch capture:
-      //   - With fix: 3 cols → Figma | Current | Fixed
+      //   - With fix + current: 3 cols → Figma | Current | Fixed
+      //   - With fix only: 2 cols → Figma | Fixed   (was missing — bug fix)
       //   - Without fix, with diff: 3 cols → Figma | Current | Diff
       //   - Without fix, no diff: 2 cols → Figma | Current
-      const fixedImg = fixedEvidence?.impl ?? null;
       const showDiff = !suiteEvidenceBroken && (evidence?.overlay || evidence?.diff);
-      if (fixedImg) {
+      const fixedDiff = fixedEvidence?.diff ?? fixedEvidence?.overlay ?? null;
+      if (fixedImg && evidence?.impl) {
         thumbsHtml = `
         <div class="thumbs">
           ${thumb(figmaImg, 'Figma (target)', figmaHref)}
-          ${thumb(evidence?.impl, 'Current (:3000)')}
-          ${thumb(fixedImg, 'Fixed (:3100)')}
+          ${thumb(evidence?.impl, 'Current')}
+          ${thumb(fixedImg, fixedLabel)}
+        </div>
+        ${fixedDiff ? `<div class="thumbs thumbs-1">${thumb(fixedDiff, 'Diff (fixed vs Figma)')}</div>` : ''}
+      `;
+      } else if (fixedImg) {
+        // Three cols when we have a diff PNG: Figma | Fixed live | Diff.
+        // Two cols when no diff: Figma | Fixed live.
+        thumbsHtml = fixedDiff
+          ? `
+        <div class="thumbs">
+          ${thumb(figmaImg, 'Figma (target)', figmaHref)}
+          ${thumb(fixedImg, fixedLabel)}
+          ${thumb(fixedDiff, 'Diff (fixed vs Figma)')}
+        </div>
+      `
+          : `
+        <div class="thumbs thumbs-2">
+          ${thumb(figmaImg, 'Figma (target)', figmaHref)}
+          ${thumb(fixedImg, fixedLabel)}
         </div>
       `;
       } else if (showDiff) {

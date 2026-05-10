@@ -131,6 +131,27 @@ for (const leaf of cited.keys()) {
 }
 console.log(`[figma-context] ${leafToArtboard.size} leaves → ${artboardSet.size} unique artboards`);
 
+// Emit a leaf→artboard map so the dashboard's pickFrame can walk Figma
+// ancestry without re-querying the Figma REST API. Lives alongside
+// per-bullet-context/ as a sibling JSON.
+{
+  const mapDir = join(process.cwd(), 'uimatch-results');
+  mkdirSync(mapDir, { recursive: true });
+  const obj = {};
+  for (const [leaf, artboard] of leafToArtboard) {
+    const ab = byId.get(artboard);
+    obj[leaf] = {
+      artboard_node_id: artboard,
+      artboard_name: ab?.name ?? null,
+      artboard_size: ab?.absoluteBoundingBox
+        ? { w: Math.round(ab.absoluteBoundingBox.width), h: Math.round(ab.absoluteBoundingBox.height) }
+        : null,
+    };
+  }
+  writeFileSync(join(mapDir, 'leaf-to-artboard.json'), JSON.stringify(obj, null, 2));
+  console.log(`[figma-context] wrote leaf-to-artboard.json (${Object.keys(obj).length} entries)`);
+}
+
 // Render artboards via Figma /images endpoint at 1× to keep file size reasonable.
 async function renderArtboards(ids) {
   const url = `https://api.figma.com/v1/images/${fileKey}?ids=${ids.join(',')}&format=png&scale=1`;
@@ -227,7 +248,28 @@ async function exportContext(leafId, artboardId, bulletIds) {
     .png()
     .toFile(outPath);
 
-  return { leafId, artboardId, outPath, leafBox: { x, y, w, h }, imageSize: { w: meta.width, h: meta.height } };
+  // Also write a ZOOMED variant: the same composite cropped to the leaf's
+  // bbox plus generous context padding, so sub-100px elements aren't lost
+  // in the full 402×2762 mobile artboard. Padding scales with leaf size:
+  //   - tiny (≤100px tall): pad ~3× the leaf height (so element is ~25%)
+  //   - medium: pad 1× leaf height
+  //   - large (≥800px tall): pad 0.25× — already takes most of the canvas
+  const padFactor = h <= 100 ? 3 : h <= 400 ? 1 : 0.25;
+  const padX = Math.round(Math.max(60, w * padFactor));
+  const padY = Math.round(Math.max(80, h * padFactor));
+  const cx = Math.max(0, x - padX);
+  const cy = Math.max(0, y - padY);
+  const cw = Math.min(meta.width - cx, w + padX * 2);
+  const ch = Math.min(meta.height - cy, h + padY * 2);
+
+  const zoomPath = join(outDir, `${leafId.replace(':', '-')}-zoom.png`);
+  await sharp(buf)
+    .composite([{ input: Buffer.from(svg), top: 0, left: 0 }])
+    .extract({ left: cx, top: cy, width: cw, height: ch })
+    .png()
+    .toFile(zoomPath);
+
+  return { leafId, artboardId, outPath, zoomPath, leafBox: { x, y, w, h }, imageSize: { w: meta.width, h: meta.height } };
 }
 
 console.log('[figma-context] generating context PNGs…');

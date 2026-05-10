@@ -67,8 +67,11 @@ Branch on the result:
 - **MODE_A** → load `references/cold-start.md` and follow the workflow there. Do NOT proceed to Step 1 below until cold-start finishes.
 - **MODE_B** → load `references/discovery.md` and follow the workflow there. After discovery completes, fall through to Step 1.
 - **MODE_C** → continue to Step 1.
+- **MODE_D** → triggered when the user says "re-audit" or "fresh audit" with an existing `## 9.` section. Load `references/re-audit.md`. Appends a new `### 9X.` subsection without clobbering existing content.
 
 If `.ui-check-config.json` doesn't exist but the audit doc does, treat as MODE_C — the project pre-dates the config file (no discovery available, but the existing fix loop still works).
+
+When dispatching from a doc that has approved (`[x]`) bullets *without* `<!-- dispatched: <sha> -->` markers (e.g. fixes shipped before the skill existed), pass `--skip-pre-existing-fixed` to `parse-bullets.mjs` so those legacy items aren't redispatched as if they were new approvals.
 
 ### Step 1 — Locate the audit doc
 

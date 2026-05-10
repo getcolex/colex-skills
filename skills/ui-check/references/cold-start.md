@@ -23,6 +23,19 @@ Do NOT batch the questions. Ask one, wait for the answer, ask the next.
 
 3. **"What's the live URL of the running site?"** e.g. `http://localhost:3000`. Validate that it returns 200 with `curl -s -o /dev/null -w "%{http_code}" <url> --max-time 5`. If not, ask: "I can't reach <url> — is the dev server running?" before proceeding.
 
+   **Critical**: if the user is in a git worktree and another worktree has a dev server running, port collisions are silent (`nohup npm run dev` will print `port: <N>` regardless of whether the bind succeeded). Before accepting the live URL:
+   ```bash
+   PORT=$(node ~/.claude/skills/ui-check/scripts/find-free-port.mjs <starting-port>)
+   ```
+   If the user-supplied port is already in use, `find-free-port.mjs` returns the next free port. Confirm with the user: "Port :3000 is in use by another process. I'll use :$PORT for this worktree's dev server. OK?"
+
+   Then verify the URL actually serves THIS worktree by checking process cwd:
+   ```bash
+   PID=$(lsof -i :$PORT -sTCP:LISTEN -nP -t | head -1)
+   lsof -p "$PID" -a -d cwd | tail -1
+   ```
+   The cwd path should match the user's project root. If it doesn't, the URL points at a different worktree and any uimatch capture will measure the wrong site.
+
 ### Step 2: Save config to project root
 
 After all three questions are answered, write `.ui-check-config.json` to the project root:
