@@ -9,6 +9,7 @@ Claude Code skills for development workflows.
 | [gemini-sidekick](skills/gemini-sidekick/) | Delegate tasks to Google Gemini CLI with 1M token context and free Google Search |
 | [gemini-code-review](skills/gemini-code-review/) | Two-pass parallel Gemini code review with automatic Claude verification |
 | [tdd-plan-executor](skills/tdd-plan-executor/) | Execute implementation plans using strict TDD with Gemini review and sonnet subagents |
+| [ui-check](skills/ui-check/) | HITL Figma-vs-live design-divergence audit + fix loop. Parses figma-divergences.md, dispatches per-cluster Sonnet fix-agents in parallel, refreshes a verify dashboard with per-bullet evidence (parent-frame Figma exports with bbox overlay) for designer triage. |
 
 ## Installation
 
