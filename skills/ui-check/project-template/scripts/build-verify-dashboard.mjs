@@ -63,13 +63,17 @@ const sec9 = md.split(/^## 9\./m)[1] || '';
 // STATE ∈ { ' ', 'x', '-', '?', '~' }; ID looks like 9A.1 / 9B.12 / 9F.3.
 // Optional trailing HTML comment carries free-text notes (typed in the
 // dashboard's TBD textarea) without disturbing markdown rendering.
-const BULLET_RE = /^- \[([ x\-~?r])\] \*\*(9[A-Z]\.\d+)\*\* (.+)$/gm;
+// Bullet shape (page-keyed):
+//   - [STATE] **ID** [page=<name>] body (Figma `<node>`)
+// Capture group 3 is the page name; capture group 4 is the rest of the body.
+const BULLET_RE = /^- \[([ x\-~?r])\] \*\*(9[A-Z]\.\d+)\*\* \[page=([a-z0-9-]+)\] (.+)$/gm;
 const NOTE_RE = /<!--\s*note:\s*([\s\S]*?)\s*-->/;
 const DISPATCH_RE = /<!--\s*dispatched:\s*([0-9a-f]{7,40})\s*-->/;
 const SUMMARY_RE = /<!--\s*agent-summary:\s*([\s\S]*?)\s*-->/;
+const PAGES = CFG.pages || {};
 const bullets = [];
 for (const m of sec9.matchAll(BULLET_RE)) {
-  const [, stateChar, id, fullBody] = m;
+  const [, stateChar, id, page, fullBody] = m;
   const state = ({ ' ': 'open', 'x': 'approved', '-': 'wont_fix', 'r': 'retry', '?': 'tbd', '~': 'partial' })[stateChar] ?? 'open';
   // Pull every trailing HTML comment out of the body.
   const noteMatch = fullBody.match(NOTE_RE);
@@ -83,14 +87,12 @@ for (const m of sec9.matchAll(BULLET_RE)) {
   const note = noteMatch ? noteMatch[1].trim() : '';
   const dispatchedSha = dispMatch ? dispMatch[1] : null;
   const agentSummary = sumMatch ? sumMatch[1].trim() : '';
-  // Extract first Figma node citation for viewport lookup.
-  const figmaNodeMatch = body.match(/Figma `(\d+:\d+|\d+-\d+)`/);
-  const firstFigmaNode = figmaNodeMatch ? figmaNodeMatch[1].replace('-', ':') : null;
-  const vpCache = readViewportCache(firstFigmaNode);
-  const viewport = vpCache?.viewport ?? null;
-  const viewportKind = vpCache?.kind ?? null;
-  const frameSize = vpCache?.frame ?? null;
-  bullets.push({ id, state, body, note, dispatchedSha, agentSummary, viewport, viewportKind, frameSize, raw: m[0] });
+  // Page-keyed viewport: read from .ui-check-config.json's pages registry.
+  const pageEntry = PAGES[page];
+  const viewport = pageEntry?.viewport ?? null;
+  const viewportKind = viewport ? (viewport.width <= 599 ? 'mobile' : viewport.width <= 1023 ? 'tablet' : 'desktop') : null;
+  const frameSize = null;
+  bullets.push({ id, page, state, body, note, dispatchedSha, agentSummary, viewport, viewportKind, frameSize, raw: m[0] });
 }
 
 // ──────────────────────────────────────────────────────────────────────
@@ -367,23 +369,44 @@ async function flushFetchPlan() {
 
 function evidenceFor(frame) {
   if (!frame) return null;
-  const dir = join(RESULTS, frame);
-  if (!existsSync(dir)) return null;
-  const figma = existsSync(join(dir, 'figma.png')) ? `../uimatch-results/${frame}/figma.png` : null;
-  const impl = existsSync(join(dir, 'impl.png')) ? `../uimatch-results/${frame}/impl.png` : null;
-  const diff = existsSync(join(dir, 'diff.png')) ? `../uimatch-results/${frame}/diff.png` : null;
-  const overlay = existsSync(join(dir, 'overlay.png')) ? `../uimatch-results/${frame}/overlay.png` : null;
+  const dir = resolveFrameDir(RESULTS, frame);
+  if (!dir) return null;
+  const dirName = dir.split('/').pop();
+  const figma = existsSync(join(dir, 'figma.png')) ? `../uimatch-results/${dirName}/figma.png` : null;
+  const impl = existsSync(join(dir, 'impl.png')) ? `../uimatch-results/${dirName}/impl.png` : null;
+  const diff = existsSync(join(dir, 'diff.png')) ? `../uimatch-results/${dirName}/diff.png` : null;
+  const overlay = existsSync(join(dir, 'overlay.png')) ? `../uimatch-results/${dirName}/overlay.png` : null;
   return { figma, impl, diff, overlay };
+}
+
+// Resolve a logical frame name (page name in the new pipeline) to the actual
+// uimatch-results dir, which is prefixed with the suite item index — e.g.
+// frame "landing-mobile" lives in "001-landing-mobile". We accept either form.
+function resolveFrameDir(root, frame) {
+  if (!frame) return null;
+  const direct = join(root, frame);
+  if (existsSync(direct)) return direct;
+  if (!existsSync(root)) return null;
+  try {
+    const dirs = readdirSync(root);
+    const hit = dirs.find((d) => d.endsWith(`-${frame}`) || d === frame);
+    if (hit) return join(root, hit);
+  } catch {
+    /* ignore */
+  }
+  return null;
 }
 
 // Companion to evidenceFor() — returns the "fixed branch" capture if available.
 function fixedEvidenceFor(frame) {
   if (!frame || !HAS_FIXED) return null;
-  const dir = join(RESULTS_FIXED, frame);
-  if (!existsSync(dir)) return null;
-  const impl = existsSync(join(dir, 'impl.png')) ? `../uimatch-results-fixed/${frame}/impl.png` : null;
-  const diff = existsSync(join(dir, 'diff.png')) ? `../uimatch-results-fixed/${frame}/diff.png` : null;
-  const overlay = existsSync(join(dir, 'overlay.png')) ? `../uimatch-results-fixed/${frame}/overlay.png` : null;
+  const dir = resolveFrameDir(RESULTS_FIXED, frame);
+  if (!dir) return null;
+  // Recover the dir BASENAME so the rendered URL matches what's on disk.
+  const dirName = dir.split('/').pop();
+  const impl = existsSync(join(dir, 'impl.png')) ? `../uimatch-results-fixed/${dirName}/impl.png` : null;
+  const diff = existsSync(join(dir, 'diff.png')) ? `../uimatch-results-fixed/${dirName}/diff.png` : null;
+  const overlay = existsSync(join(dir, 'overlay.png')) ? `../uimatch-results-fixed/${dirName}/overlay.png` : null;
   return { impl, diff, overlay };
 }
 
@@ -397,9 +420,11 @@ function fixedEvidenceFor(frame) {
 // 5. Render cards.
 
 function renderCard(bullet) {
-  const { id, state, body, note, dispatchedSha, agentSummary, viewport, viewportKind } = bullet;
+  const { id, page, state, body, note, dispatchedSha, agentSummary, viewport, viewportKind } = bullet;
   const refs = extractRefs(body);
-  const frame = pickFrame(body, refs.figmaNodes);
+  // Page-keyed: the page name IS the uimatch frame name, by construction.
+  // No more pickFrame heuristics, no more node-id truncation collisions.
+  const frame = page;
   const kind = classify(body);
   const evidence = evidenceFor(frame);
   const fixedEvidence = fixedEvidenceFor(frame);
@@ -423,18 +448,19 @@ function renderCard(bullet) {
   let perBulletFigma = null;
   if (figmaNodeId) {
     planNodeFetch(figmaNodeId);
-    const safeId = figmaNodeId.replace(/[:]/g, '-');
-    // Prefer the per-bullet ZOOMED export (tight crop around the cited node
-    // with surrounding context padding). This gives reviewers a readable view
-    // of the divergence instead of the full artboard with a tiny red box.
-    // Fall back to the full annotated artboard, then the bare leaf export.
-    const zoomPath = join(REPO, 'uimatch-results', 'per-bullet-context', `${safeId}-zoom.png`);
-    const contextPath = join(REPO, 'uimatch-results', 'per-bullet-context', `${safeId}.png`);
+    // Page-keyed: per-bullet-context PNGs are keyed by BULLET ID now (one
+    // per bullet, no node-id collisions). Prefer the zoom variant; fall back
+    // to the full artboard with overlay if zoom isn't available.
+    const zoomPath = join(REPO, 'uimatch-results', 'per-bullet-context', `${id}-zoom.png`);
+    const contextPath = join(REPO, 'uimatch-results', 'per-bullet-context', `${id}.png`);
     if (existsSync(zoomPath)) {
-      perBulletFigma = `../uimatch-results/per-bullet-context/${safeId}-zoom.png`;
+      perBulletFigma = `../uimatch-results/per-bullet-context/${id}-zoom.png`;
     } else if (existsSync(contextPath)) {
-      perBulletFigma = `../uimatch-results/per-bullet-context/${safeId}.png`;
+      perBulletFigma = `../uimatch-results/per-bullet-context/${id}.png`;
     } else {
+      // Last resort: legacy per-bullet/<node>.png (only present in projects
+      // that haven't migrated to page-keyed bullets).
+      const safeId = figmaNodeId.replace(/[:]/g, '-');
       perBulletFigma = `../uimatch-results/per-bullet/${safeId}.png`;
     }
   }

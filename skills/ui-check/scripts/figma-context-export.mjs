@@ -1,23 +1,24 @@
 #!/usr/bin/env node
 /**
- * figma-context-export.mjs
+ * figma-context-export.mjs — page-keyed.
  *
- * For each bullet's cited Figma node, fetch the parent FRAME and draw a red
- * rectangle around the leaf node so reviewers see the divergence in context
- * instead of an isolated atom (e.g. "AAREY COMMUNITY" 26px sliver).
+ * For each bullet in the audit doc with `[page=<name>]` and a `Figma <node>`
+ * citation, fetch the page's artboard from Figma and draw a labeled red box
+ * around the cited leaf node's bbox. Output:
+ *   uimatch-results/per-bullet-context/<bullet-id>.png        (full artboard)
+ *   uimatch-results/per-bullet-context/<bullet-id>-zoom.png   (cropped)
  *
- * Output: uimatch-results/per-bullet-context/<node-with-dash>.png
+ * Bullet ID becomes the canonical key — no node-id truncation, no
+ * collisions. Each bullet gets exactly one Figma evidence pair.
  *
  * Usage:
- *   node scripts/figma-context-export.mjs --audit-doc docs/figma-divergences.md
+ *   node figma-context-export.mjs --audit-doc docs/figma-divergences.md
  *
- * Env: FIGMA_ACCESS_TOKEN required (read from .env automatically).
+ * Env: FIGMA_ACCESS_TOKEN required.
  */
 import { readFileSync, existsSync, mkdirSync, writeFileSync } from 'node:fs';
-import { join, dirname } from 'node:path';
+import { join } from 'node:path';
 import sharp from 'sharp';
-
-// --- args + env -------------------------------------------------------------
 
 function parseArgs(argv) {
   const out = {};
@@ -34,7 +35,7 @@ function parseArgs(argv) {
 
 const args = parseArgs(process.argv.slice(2));
 const docPath = args['audit-doc'] || 'docs/figma-divergences.md';
-const cfgPath = args['config'] || '.ui-check-config.json';
+const cfgPath = args.config || '.ui-check-config.json';
 
 if (!existsSync(cfgPath)) {
   console.error(`config not found: ${cfgPath}`);
@@ -42,250 +43,155 @@ if (!existsSync(cfgPath)) {
 }
 const cfg = JSON.parse(readFileSync(cfgPath, 'utf8'));
 const fileKey = cfg.figma_file_key;
-const canvasNode = cfg.figma_canvas_node_id;
-
+const pages = cfg.pages || {};
+if (!fileKey || Object.keys(pages).length === 0) {
+  console.error('config missing figma_file_key or pages{}');
+  process.exit(1);
+}
 const token = process.env.FIGMA_ACCESS_TOKEN;
 if (!token) {
   console.error('FIGMA_ACCESS_TOKEN not set');
   process.exit(1);
 }
 
-// --- collect cited nodes from audit doc ------------------------------------
+// --- parse bullets: one entry per bullet with page + figma node ---
 
 const md = readFileSync(docPath, 'utf8');
 const sec9 = md.split(/^## 9\./m)[1] || '';
-const bulletRe = /^- \[([ x\-~?r])\] \*\*(9[A-Z]\.\d+)\*\* (.+?)(?=\n- \[|$)/gms;
-const cited = new Map(); // node-id -> [bullet ids]
-let m;
-while ((m = bulletRe.exec(sec9)) !== null) {
-  const [, , id, body] = m;
-  const nodes = (body.match(/Figma `(\d+:\d+)`/g) || []).map(s => s.match(/(\d+:\d+)/)[1]);
-  for (const n of nodes) {
-    if (!cited.has(n)) cited.set(n, []);
-    cited.get(n).push(id);
+// Bullet line shape:
+//   - [STATE] **ID** [page=<name>] body. (Figma `<node>`)
+const BULLET_RE = /^- \[([ x\-~?r])\] \*\*(9[A-Z]\.\d+)\*\* \[page=([a-z0-9-]+)\] (.+?)$/gm;
+const bullets = [];
+for (const m of sec9.matchAll(BULLET_RE)) {
+  const [, , id, page, body] = m;
+  if (!pages[page]) {
+    console.warn(`[figma-context] bullet ${id} cites page="${page}" not in registry; skipping`);
+    continue;
   }
+  const figmaNodeMatch = body.match(/Figma `(\d+:\d+|\d+-\d+)`/);
+  if (!figmaNodeMatch) {
+    console.warn(`[figma-context] bullet ${id} has no Figma node citation; skipping`);
+    continue;
+  }
+  bullets.push({ id, page, leafNodeId: figmaNodeMatch[1].replace('-', ':') });
 }
-console.log(`[figma-context] ${cited.size} unique nodes cited across ${[...cited.values()].flat().length} bullet refs`);
+console.log(`[figma-context] ${bullets.length} bullets to export`);
 
-// --- pull node tree --------------------------------------------------------
+// --- fetch each artboard once, then crop per bullet ---
 
-async function fetchNodes(ids) {
-  const url = `https://api.figma.com/v1/files/${fileKey}/nodes?ids=${ids.join(',')}&geometry=paths`;
+async function fetchArtboardImageUrl(artboardId) {
+  const url = `https://api.figma.com/v1/images/${fileKey}?ids=${artboardId}&format=png&scale=1`;
   const r = await fetch(url, { headers: { 'X-Figma-Token': token } });
-  if (!r.ok) throw new Error(`Figma /nodes returned ${r.status}: ${await r.text().catch(() => '')}`);
-  return (await r.json()).nodes || {};
+  if (!r.ok) throw new Error(`Figma /images returned ${r.status}`);
+  return (await r.json()).images[artboardId];
 }
 
-// --- canvas ancestry walk: leaf → enclosing FRAME --------------------------
-// Strategy: fetch full canvas (cheap, one request), build child→parent map,
-// for each leaf walk up until we hit a FRAME / COMPONENT (top-level artboard).
-
-console.log('[figma-context] fetching canvas tree…');
-const canvasResp = await fetchNodes([canvasNode]);
-const canvasDoc = canvasResp[canvasNode]?.document;
-if (!canvasDoc) {
-  console.error(`canvas ${canvasNode} not found`);
-  process.exit(1);
+async function fetchNode(nodeId) {
+  const url = `https://api.figma.com/v1/files/${fileKey}/nodes?ids=${nodeId}`;
+  const r = await fetch(url, { headers: { 'X-Figma-Token': token } });
+  if (!r.ok) throw new Error(`Figma /nodes returned ${r.status}`);
+  return (await r.json()).nodes[nodeId]?.document;
 }
 
-const parents = new Map(); // childId -> parentNode
-const byId = new Map(); // nodeId -> node
-function walk(node, parent) {
-  byId.set(node.id, node);
-  if (parent) parents.set(node.id, parent);
-  for (const c of node.children || []) walk(c, node);
-}
-walk(canvasDoc, null);
-console.log(`[figma-context] canvas tree has ${byId.size} nodes`);
-
-// --- find each cited node's enclosing artboard frame ----------------------
-
-function findArtboard(nodeId) {
-  let cur = byId.get(nodeId);
-  if (!cur) return null;
-  // Walk up until we find a FRAME/COMPONENT whose parent is the canvas itself.
-  while (cur && parents.has(cur.id)) {
-    const parent = parents.get(cur.id);
-    if (parent.id === canvasNode || parent.type === 'CANVAS') {
-      // cur is a top-level artboard
-      if (cur.type === 'FRAME' || cur.type === 'COMPONENT' || cur.type === 'INSTANCE') return cur;
-      return null;
-    }
-    cur = parent;
+function findLeaf(node, leafId) {
+  if (node.id === leafId) return node;
+  for (const c of node.children || []) {
+    const hit = findLeaf(c, leafId);
+    if (hit) return hit;
   }
   return null;
 }
-
-// --- batch: render each unique enclosing artboard once ---------------------
-
-const leafToArtboard = new Map(); // leafId -> artboardId
-const artboardSet = new Set();
-for (const leaf of cited.keys()) {
-  const ab = findArtboard(leaf);
-  if (!ab) {
-    console.warn(`[figma-context] no artboard for leaf ${leaf}; skipping`);
-    continue;
-  }
-  leafToArtboard.set(leaf, ab.id);
-  artboardSet.add(ab.id);
-}
-console.log(`[figma-context] ${leafToArtboard.size} leaves → ${artboardSet.size} unique artboards`);
-
-// Emit a leaf→artboard map so the dashboard's pickFrame can walk Figma
-// ancestry without re-querying the Figma REST API. Lives alongside
-// per-bullet-context/ as a sibling JSON.
-{
-  const mapDir = join(process.cwd(), 'uimatch-results');
-  mkdirSync(mapDir, { recursive: true });
-  const obj = {};
-  for (const [leaf, artboard] of leafToArtboard) {
-    const ab = byId.get(artboard);
-    obj[leaf] = {
-      artboard_node_id: artboard,
-      artboard_name: ab?.name ?? null,
-      artboard_size: ab?.absoluteBoundingBox
-        ? { w: Math.round(ab.absoluteBoundingBox.width), h: Math.round(ab.absoluteBoundingBox.height) }
-        : null,
-    };
-  }
-  writeFileSync(join(mapDir, 'leaf-to-artboard.json'), JSON.stringify(obj, null, 2));
-  console.log(`[figma-context] wrote leaf-to-artboard.json (${Object.keys(obj).length} entries)`);
-}
-
-// Render artboards via Figma /images endpoint at 1× to keep file size reasonable.
-async function renderArtboards(ids) {
-  const url = `https://api.figma.com/v1/images/${fileKey}?ids=${ids.join(',')}&format=png&scale=1`;
-  const r = await fetch(url, { headers: { 'X-Figma-Token': token } });
-  if (!r.ok) throw new Error(`Figma /images returned ${r.status}: ${await r.text().catch(() => '')}`);
-  return (await r.json()).images || {};
-}
-
-console.log('[figma-context] requesting artboard renders from Figma…');
-// Chunk: Figma /images caps at ~50 ids per request.
-const artboardIds = [...artboardSet];
-const renderUrls = {};
-for (let i = 0; i < artboardIds.length; i += 30) {
-  const chunk = artboardIds.slice(i, i + 30);
-  const urls = await renderArtboards(chunk);
-  Object.assign(renderUrls, urls);
-}
-
-// --- download artboard PNGs (cache by artboard id) ------------------------
 
 const outDir = join(process.cwd(), 'uimatch-results', 'per-bullet-context');
 const cacheDir = join(process.cwd(), 'uimatch-results', '_artboard-cache');
 mkdirSync(outDir, { recursive: true });
 mkdirSync(cacheDir, { recursive: true });
 
-async function getArtboardBuffer(artboardId) {
+const artboardCache = new Map(); // artboardId -> { buf, doc, bbox }
+
+async function getArtboard(artboardId) {
+  if (artboardCache.has(artboardId)) return artboardCache.get(artboardId);
   const cachePath = join(cacheDir, `${artboardId.replace(':', '-')}.png`);
-  if (existsSync(cachePath)) return readFileSync(cachePath);
-  const url = renderUrls[artboardId];
-  if (!url) throw new Error(`no render URL for ${artboardId}`);
-  const r = await fetch(url);
-  if (!r.ok) throw new Error(`download ${artboardId} failed: ${r.status}`);
-  const buf = Buffer.from(await r.arrayBuffer());
-  writeFileSync(cachePath, buf);
-  return buf;
-}
-
-// --- compute leaf bbox in artboard coords + draw overlay -------------------
-// Figma absoluteBoundingBox is in canvas coords. Leaf-in-artboard = leaf.bbox - artboard.bbox.
-// Render is at scale 1 — but Figma sometimes returns 2x for retina; we'll compute scale from the actual PNG dims.
-
-function box(node) {
-  const b = node.absoluteBoundingBox;
-  if (!b) return null;
-  return { x: b.x, y: b.y, w: b.width, h: b.height };
-}
-
-async function exportContext(leafId, artboardId, bulletIds) {
-  const leaf = byId.get(leafId);
-  const artboard = byId.get(artboardId);
-  const lb = box(leaf), ab = box(artboard);
-  if (!lb || !ab) {
-    console.warn(`[figma-context] missing bbox for leaf ${leafId} or artboard ${artboardId}`);
-    return null;
+  let buf;
+  if (existsSync(cachePath)) {
+    buf = readFileSync(cachePath);
+  } else {
+    const url = await fetchArtboardImageUrl(artboardId);
+    const r = await fetch(url);
+    if (!r.ok) throw new Error(`download ${artboardId} failed: ${r.status}`);
+    buf = Buffer.from(await r.arrayBuffer());
+    writeFileSync(cachePath, buf);
   }
-
-  const buf = await getArtboardBuffer(artboardId);
-  const meta = await sharp(buf).metadata();
-  // Determine scale: rendered px / figma px.
-  const scaleX = meta.width / ab.w;
-  const scaleY = meta.height / ab.h;
-
-  // Leaf bbox in rendered px (relative to artboard top-left).
-  const x = Math.round((lb.x - ab.x) * scaleX);
-  const y = Math.round((lb.y - ab.y) * scaleY);
-  const w = Math.max(1, Math.round(lb.w * scaleX));
-  const h = Math.max(1, Math.round(lb.h * scaleY));
-
-  // SVG overlay: red rect with semi-transparent fill + thick border.
-  const stroke = Math.max(3, Math.round(meta.width / 200));
-  const labelText = leafId;
-  const labelFontSize = Math.max(14, Math.round(meta.width / 60));
-  const labelPad = Math.round(labelFontSize * 0.4);
-  const labelW = labelText.length * labelFontSize * 0.62 + labelPad * 2;
-  const labelH = labelFontSize + labelPad * 2;
-  const labelX = Math.max(0, Math.min(x, meta.width - labelW));
-  const labelY = Math.max(labelH, y) - labelH;
-
-  const svg = `
-    <svg width="${meta.width}" height="${meta.height}" xmlns="http://www.w3.org/2000/svg">
-      <rect x="${x}" y="${y}" width="${w}" height="${h}"
-            fill="rgba(255, 51, 51, 0.18)" stroke="#ff3333" stroke-width="${stroke}" />
-      <rect x="${labelX}" y="${labelY}" width="${labelW}" height="${labelH}"
-            fill="#ff3333" />
-      <text x="${labelX + labelPad}" y="${labelY + labelFontSize + labelPad / 2}"
-            font-family="ui-monospace, monospace" font-size="${labelFontSize}"
-            font-weight="700" fill="white">${labelText}</text>
-    </svg>
-  `.trim();
-
-  const outPath = join(outDir, `${leafId.replace(':', '-')}.png`);
-  await sharp(buf)
-    .composite([{ input: Buffer.from(svg), top: 0, left: 0 }])
-    .png()
-    .toFile(outPath);
-
-  // Also write a ZOOMED variant: the same composite cropped to the leaf's
-  // bbox plus generous context padding, so sub-100px elements aren't lost
-  // in the full 402×2762 mobile artboard. Padding scales with leaf size:
-  //   - tiny (≤100px tall): pad ~3× the leaf height (so element is ~25%)
-  //   - medium: pad 1× leaf height
-  //   - large (≥800px tall): pad 0.25× — already takes most of the canvas
-  const padFactor = h <= 100 ? 3 : h <= 400 ? 1 : 0.25;
-  const padX = Math.round(Math.max(60, w * padFactor));
-  const padY = Math.round(Math.max(80, h * padFactor));
-  const cx = Math.max(0, x - padX);
-  const cy = Math.max(0, y - padY);
-  const cw = Math.min(meta.width - cx, w + padX * 2);
-  const ch = Math.min(meta.height - cy, h + padY * 2);
-
-  const zoomPath = join(outDir, `${leafId.replace(':', '-')}-zoom.png`);
-  await sharp(buf)
-    .composite([{ input: Buffer.from(svg), top: 0, left: 0 }])
-    .extract({ left: cx, top: cy, width: cw, height: ch })
-    .png()
-    .toFile(zoomPath);
-
-  return { leafId, artboardId, outPath, zoomPath, leafBox: { x, y, w, h }, imageSize: { w: meta.width, h: meta.height } };
+  const doc = await fetchNode(artboardId);
+  const entry = { buf, doc, bbox: doc.absoluteBoundingBox };
+  artboardCache.set(artboardId, entry);
+  return entry;
 }
 
-console.log('[figma-context] generating context PNGs…');
 let ok = 0, fail = 0;
-for (const [leafId, artboardId] of leafToArtboard) {
+for (const b of bullets) {
   try {
-    const r = await exportContext(leafId, artboardId, cited.get(leafId));
-    if (r) {
-      ok++;
-      console.log(`  ✓ ${leafId} → per-bullet-context/${leafId.replace(':', '-')}.png (artboard ${artboardId}, leaf ${r.leafBox.w}×${r.leafBox.h}px)`);
-    } else {
+    const page = pages[b.page];
+    const ab = await getArtboard(page.figma_artboard);
+    const leaf = findLeaf(ab.doc, b.leafNodeId);
+    if (!leaf || !leaf.absoluteBoundingBox) {
+      console.warn(`  ✗ ${b.id}: leaf ${b.leafNodeId} not found in artboard ${page.figma_artboard}`);
       fail++;
+      continue;
     }
+    const meta = await sharp(ab.buf).metadata();
+    const sx = meta.width / ab.bbox.width;
+    const sy = meta.height / ab.bbox.height;
+    const x = Math.round((leaf.absoluteBoundingBox.x - ab.bbox.x) * sx);
+    const y = Math.round((leaf.absoluteBoundingBox.y - ab.bbox.y) * sy);
+    const w = Math.max(2, Math.round(leaf.absoluteBoundingBox.width * sx));
+    const h = Math.max(2, Math.round(leaf.absoluteBoundingBox.height * sy));
+
+    const stroke = Math.max(3, Math.round(meta.width / 200));
+    const labelText = b.id;
+    const fontSize = Math.max(14, Math.round(meta.width / 60));
+    const labelPad = Math.round(fontSize * 0.4);
+    const labelW = labelText.length * fontSize * 0.62 + labelPad * 2;
+    const labelH = fontSize + labelPad * 2;
+    const labelX = Math.max(0, Math.min(x, meta.width - labelW));
+    const labelY = Math.max(labelH, y) - labelH;
+
+    const svg = `
+      <svg width="${meta.width}" height="${meta.height}" xmlns="http://www.w3.org/2000/svg">
+        <rect x="${x}" y="${y}" width="${w}" height="${h}"
+              fill="rgba(255, 51, 51, 0.18)" stroke="#ff3333" stroke-width="${stroke}" />
+        <rect x="${labelX}" y="${labelY}" width="${labelW}" height="${labelH}" fill="#ff3333" />
+        <text x="${labelX + labelPad}" y="${labelY + fontSize + labelPad / 2}"
+              font-family="ui-monospace, monospace" font-size="${fontSize}"
+              font-weight="700" fill="white">${labelText}</text>
+      </svg>
+    `.trim();
+
+    const fullPath = join(outDir, `${b.id}.png`);
+    await sharp(ab.buf)
+      .composite([{ input: Buffer.from(svg), top: 0, left: 0 }])
+      .png()
+      .toFile(fullPath);
+
+    // Zoom variant: read just-written annotated PNG, extract padded crop.
+    const padFactor = h <= 100 ? 3 : h <= 400 ? 1 : 0.25;
+    const padX = Math.round(Math.max(60, w * padFactor));
+    const padY = Math.round(Math.max(80, h * padFactor));
+    const cx = Math.max(0, x - padX);
+    const cy = Math.max(0, y - padY);
+    const cw = Math.min(meta.width - cx, w + padX * 2);
+    const ch = Math.min(meta.height - cy, h + padY * 2);
+    const zoomPath = join(outDir, `${b.id}-zoom.png`);
+    await sharp(fullPath)
+      .extract({ left: cx, top: cy, width: cw, height: ch })
+      .png()
+      .toFile(zoomPath);
+
+    ok++;
+    console.log(`  ✓ ${b.id} (page=${b.page}, leaf=${b.leafNodeId}, ${w}×${h}px in ${meta.width}×${meta.height})`);
   } catch (e) {
+    console.error(`  ✗ ${b.id}: ${e.message}`);
     fail++;
-    console.error(`  ✗ ${leafId} failed: ${e.message}`);
   }
 }
 console.log(`[figma-context] done — ${ok} written, ${fail} failed`);

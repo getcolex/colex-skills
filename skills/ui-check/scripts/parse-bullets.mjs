@@ -249,9 +249,10 @@ async function resolveViewport(fileKey, nodeId, token) {
   return result;
 }
 
-// Bullet shape: `- [STATE] **<id>** <body>` optionally with trailing
-// `<!-- note: ... -->` and `<!-- dispatched: <sha> -->` HTML comments.
-const BULLET_RE = /^- \[([ x\-~?r])\] \*\*([0-9]+[A-Z]\.\d+)\*\* (.+)$/gm;
+// Bullet shape (page-keyed): `- [STATE] **<id>** [page=<name>] <body>` with
+// optional trailing `<!-- note: -->`, `<!-- dispatched: -->`, etc. comments.
+// Capture group 3 is the page name; group 4 is the rest of the body.
+const BULLET_RE = /^- \[([ x\-~?r])\] \*\*([0-9]+[A-Z]\.\d+)\*\* \[page=([a-z0-9-]+)\] (.+)$/gm;
 const NOTE_RE = /<!--\s*note:\s*([\s\S]*?)\s*-->/;
 const DISPATCH_RE = /<!--\s*dispatched:\s*([0-9a-f]{7,40})\s*-->/;
 const SUMMARY_RE = /<!--\s*agent-summary:\s*([\s\S]*?)\s*-->/;
@@ -265,7 +266,7 @@ const clusters = {};
 // Phase 1: synchronous pass collects bullets without viewport.
 const rawBullets = [];
 for (const m of sec9.matchAll(BULLET_RE)) {
-  const [, stateChar, id, fullBody] = m;
+  const [, stateChar, id, page, fullBody] = m;
   const state = STATE_NAMES[stateChar] ?? 'open';
 
   // Only act on approved (first dispatch needed) and retry (re-dispatch with
@@ -331,6 +332,7 @@ for (const m of sec9.matchAll(BULLET_RE)) {
 
   rawBullets.push({
     id,
+    page,
     state,
     body,
     note,

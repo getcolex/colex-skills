@@ -5,10 +5,12 @@ Strict spec for bullets in `docs/figma-divergences.md` § 9. Loaded by per-frame
 ## Bullet line shape
 
 ```
-- [STATE] **<id>** <description>  [<!-- note: ... -->] [<!-- dispatched: <sha> -->] [<!-- agent-summary: ... -->]
+- [STATE] **<id>** [page=<page-name>] <description>  [<!-- note: ... -->] [<!-- dispatched: <sha> -->] [<!-- agent-summary: ... -->]
 ```
 
 One bullet = one line. Multi-line content collapses to a single line in the markdown — render it spaced for readability when generating, but never break the line.
+
+The `[page=<name>]` field is **mandatory** as of the page-keyed pipeline (2026-05-10). The page name maps to an entry in `.ui-check-config.json`'s `pages:` registry, which carries the live URL viewport, selector, and Figma artboard for that page. Bullets without a `page=` field don't render in the dashboard and aren't dispatched to fix-agents.
 
 ## Required fields
 
