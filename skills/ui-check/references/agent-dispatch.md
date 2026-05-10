@@ -78,14 +78,32 @@ The uimatch report at {{bullet.evidence.uimatch_report}} contains styleDiffs[] w
 
 ## Your job
 
-1. Read all image paths listed above using the Read tool. Do this BEFORE making any edits.
-2. Make minimum-viable edits to the cited files in the worktree. One bullet → one set of edits.
-3. After ALL bullets in this cluster are fixed:
+### MANDATORY pre-coding verification (one screenshot per bullet)
+
+**Before writing or editing ANY code, for each bullet in this cluster:**
+
+1. Call `mcp__plugin_figma_figma__get_screenshot` with `fileKey={{file_key}}` and `nodeId=<bullet's first cited Figma node>`.
+2. Use `Read` on the returned image. In one sentence, describe what you SEE (not what the bullet says).
+3. Compare your description to the bullet's claims:
+   - **Bullet says "Figma shows text X"** but screenshot has no text → STOP. Frame names are file structure, not content. Report back: "Bullet {{id}} claims text but Figma node shows none. Skip." Do NOT add text.
+   - **Bullet says "X is at the left/top/centre"** but screenshot shows X elsewhere (or no X at all) → treat the screenshot as authoritative. Adjust the fix to match Figma, not the bullet wording.
+   - **Bullet's structural claim contradicts the screenshot** → report back, do NOT commit.
+4. If the bullet cites multiple Figma nodes, screenshot the first leaf node (the smallest cited element). Don't trust frame-level screenshots for leaf-level claims.
+
+If you skip this step, you will hallucinate fixes from bullet prose. Two recent fixes were wrong because the agent followed bullet wording instead of looking at Figma:
+- 9A.6 added "WHY WE MAKE BAGS" text where Figma has only an empty placeholder rect — the agent treated the frame name as content.
+- 9B.2 added a sun icon at the left of the modal nav where Figma actually shows a TINY MIRACLES wordmark+sun replacing the existing "TINY MIRACLES" text link.
+
+### After verification
+
+5. Read all evidence-packet image paths using the Read tool. Do this BEFORE making any edits.
+6. Make minimum-viable edits to the cited files in the worktree. One bullet → one set of edits.
+7. After ALL bullets in this cluster are fixed:
    - Run `npx tsc --noEmit` from {{worktree_root}}. Fix any errors before committing.
    - Commit ALL bullets in this cluster as a SINGLE commit:
      `git add <files>` then `git commit -m "fix(<scope>): <one-line> ({{bullet_ids_csv}})"`
-4. Print the commit SHA on the last line of your response (so the orchestrator can capture it).
-5. Report under 100 words: what you changed per bullet, any judgment calls.
+8. Print the commit SHA on the last line of your response (so the orchestrator can capture it).
+9. Report under 100 words: per-bullet 1-line summary of what you SAW in Figma + what you changed. Note any bullets you skipped because the screenshot contradicted the prose.
 
 ## Constraints
 
@@ -214,6 +232,14 @@ Read `~/.claude/skills/ui-check/references/audit-bullet-format.md` BEFORE writin
 4. Read the relevant React component files in the project. Start from `app/page.tsx`, `app/layout.tsx`, and any `components/*.tsx` that match the frame's content.
 5. For each visible divergence, write one bullet appended to the doc under your section heading. Format per the spec.
 6. If you cannot find the relevant React file for a divergence, write the bullet with only the Figma node citation. The dispatcher handles sparse bullets.
+
+## Bullet content rules — read carefully
+
+- **A "Figma shows text X" bullet is ONLY valid if you cite the specific TEXT node id**, not just the parent frame. Use `mcp__plugin_figma_figma__get_metadata` to find `<text>` nodes. Frame *names* (the `data-name` attribute or layer label in Figma) are file structure, not content. They never render visually.
+  - WRONG: "Figma shows the section as a tall black frame with centred text" (frame is named "Why We Make Bags" but contains no text node).
+  - RIGHT: "Figma `<text-node-id>` shows the label 'WHY WE MAKE BAGS' in PP Neue Bold 14px white centred." (Only write this if you actually found a text node with that exact string content.)
+- **Position claims must match Figma's coordinates.** Don't say "X is at the left of the nav" without confirming via `absoluteBoundingBox` that X actually sits at the left of the nav container.
+- **If Figma shows the parent of an existing live element with extra content beside it** (e.g. wordmark replaces a plain text link), describe the *replacement*, not "add a separate icon".
 
 ## Constraints
 

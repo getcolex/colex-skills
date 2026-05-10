@@ -46,11 +46,14 @@ function updateBulletState(id, newState) {
   if (!STATE_TO_CHAR[newState]) throw new Error(`unknown state: ${newState}`);
   const newChar = STATE_TO_CHAR[newState];
   const md = readFileSync(DIV_DOC, 'utf8');
-  // Find the line with this id and rewrite the state char.
-  const re = new RegExp(`^- \\[[ x\\-~?r]\\] \\*\\*${id.replace('.', '\\.')}\\*\\*`, 'm');
-  if (!re.test(md)) throw new Error(`bullet ${id} not found in ${DIV_DOC}`);
+  // Find the line with this id. Capture the current state char so we can
+  // detect "already at this state" and treat that as a successful no-op
+  // (idempotent — the dashboard sometimes re-fires the same click).
+  const re = new RegExp(`^- \\[([ x\\-~?r])\\] \\*\\*${id.replace('.', '\\.')}\\*\\*`, 'm');
+  const match = md.match(re);
+  if (!match) throw new Error(`bullet ${id} not found in ${DIV_DOC}`);
+  if (match[1] === newChar) return; // already in target state — no-op
   const updated = md.replace(re, `- [${newChar}] **${id}**`);
-  if (updated === md) throw new Error(`replace produced no change for ${id}`);
   writeFileSync(DIV_DOC, updated);
 }
 

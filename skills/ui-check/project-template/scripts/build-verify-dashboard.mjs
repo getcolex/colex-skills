@@ -604,7 +604,7 @@ function renderCard(bullet) {
         <button data-action="retry"    class="btn btn-retry">🔄 Retry</button>
         <button data-action="wont_fix" class="btn btn-wont-fix">❌ Won't fix</button>
         <button data-action="tbd"      class="btn btn-tbd">⏸ TBD</button>
-        <button data-action="open"     class="btn btn-open">↺ Reopen</button>
+        ${state === 'open' ? '' : `<button data-action="open" class="btn btn-open">↺ Reopen</button>`}
       </div>
       <div class="note-block" ${state === 'tbd' || state === 'retry' || note ? '' : 'hidden'}>
         <label class="note-label">📝 Note <span class="note-hint">(saves on blur or ⌘↵ — visible to Claude on next prompt)</span></label>
